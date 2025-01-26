@@ -1,0 +1,17 @@
+[project]
+name = "flickr2blog"
+version = "0.1.0"
+description = "Add your description here"
+readme = "README.md"
+# At the time of writing, the python wordpress wrapper expects python <3.9
+requires-python = ">=3.6,<3.9"
+dependencies = [
+    "dynaconf",
+    "flickrapi", 
+    "requests", 
+    "python-wordpress-xmlrpc"
+]
+
+[project.scripts]
+flickr2blog = "flickr2blog:main"
+

@@ -1,0 +1,17 @@
+# Some things here are have the value 'in_secrets'.
+# That's because you probably want to define them in a .secrets.toml
+# file, which will also be read by the script.
+
+# Where to download the photos
+# Directory will be created if necessary
+download_dir = "./downloads"
+
+# WordPress credentials
+wordpress_url = 'https://statusq.org/xmlrpc.php'
+wordpress_username = 'qsf'
+# wordpress_password = 'in_secrets'
+
+# Flickr API credentials
+flickr_user_id = 'quentinsf'
+# flickr_api_key = 'in_secrets'
+# flickr_api_secret = 'in_secrets'

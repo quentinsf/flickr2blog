@@ -2,6 +2,9 @@
 # 
 # Flickr API docs are here:
 # https://www.flickr.com/services/api/
+#
+# Python wrapper for WP XML-RPC API docs are here:
+# https://python-wordpress-xmlrpc.readthedocs.io/
 
 import os
 import re
@@ -48,13 +51,18 @@ def main():
                 f.write(requests.get(url).content)
 
     def download_photo(flickr_id, sizes):
+        smaller_file = None
         if 'Medium 800' in sizes:
-            download_size(sizes['Medium 800'][0], f"{flickr_id}_800.jpg")
+            smaller_file = f"{flickr_id}_800.jpg"
+            download_size(sizes['Medium 800'][0], smaller_file)
         elif 'Medium 640' in sizes:
-            download_size(sizes['Medium 640'][0], f"{flickr_id}_640.jpg")
+            smaller_file = f"{flickr_id}_640.jpg"
+            download_size(sizes['Medium 640'][0], smaller_file)
         else:
             print("    No Medium 800 - options:", sizes)
-        download_size(sizes['Original'][0], f"{flickr_id}.jpg")
+        original_file = f"{flickr_id}.jpg"
+        download_size(sizes['Original'][0], original_file)
+        return (original_file, smaller_file)
         
     
     def get_sizes(photo_id: str):
@@ -62,25 +70,39 @@ def main():
         return { s['label']: (s['source'], s['width'], s['height']) 
                   for s in size_info['sizes']['size']}
 
-
+    def upload_to_wordpress(photo_file):
+        data = {
+            'name': "2014/01/01/" + photo_file,
+            'type': 'image/jpeg',
+            'overwrite': True
+        }
+        data['bits'] = open(os.path.join(settings.download_dir, photo_file), "rb").read()
+        response = wp.call(media.UploadFile(data))
+        attachment_url = response['url']
+        return attachment_url
+    
     # flickr_re = re.compile(r'https?://(?:www\.)?flickr\.com/photos/[^\s<>"]+')
     flickr_photo_re = re.compile(r'(https?://(?:www\.)?flickr\.com/photos/quentinsf/(\d{9,10})/)')
     # Process each post and replace Flickr photos
-    for post in post_retriever(wp, 0):
+    for post in post_retriever(wp, 2000):
 
         if "flickr.com" in post.content:
             print(post.id, post.title, post.link)
+            print(dir(post))
             flickr_urls = flickr_photo_re.findall(post.content)
             for flickr_url, flickr_id in flickr_urls:
                 print("  ", flickr_url, flickr_id)
                 # print("  F:", flickr.photos.getInfo(photo_id=flickr_id))
                 sizes = get_sizes(flickr_id)
-                download_photo(flickr_id, sizes)
-                # photo_data = download_photo(flickr_url)
-                # photo_title = flickr_url.split('/')[-1]
-                # new_photo_url = upload_to_wordpress(photo_data, photo_title)
+                (original_file, smaller_file) = download_photo(flickr_id, sizes)
+
+                new_photo_url = upload_to_wordpress(smaller_file)
+                print(new_photo_url)
                 # post_content = post_content.replace(flickr_url, new_photo_url)
-        
+
+                # Die after the first upload for now
+                if new_photo_url:
+                    return
 
 if __name__ == "__main__":
     main()

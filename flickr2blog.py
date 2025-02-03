@@ -7,7 +7,9 @@
 # https://python-wordpress-xmlrpc.readthedocs.io/
 
 import argparse
+import csv
 from datetime import datetime
+from itertools import chain
 import json
 import os
 import re
@@ -36,6 +38,7 @@ def get_flickr():
 
 # How will we recognise a flickr URL?
 flickr_photo_re = re.compile(r'(https?://(?:www\.)?flickr\.com/photos/quentinsf/(\d{9,11})/?)[/"]')
+flickr_farm_photo_re = re.compile(r'(https?://(?:farm\d+\.)?static\.?flickr\.com/\d+/(\d+)_[^"]*\.jpg)"')
 
 def post_retriever(wp, offset=0):
     increment = 50
@@ -63,6 +66,9 @@ def write_post_catalog(filename, posts):
         json.dump(posts, output, indent=2)
 
 def catalog_posts(args):
+    """
+    Get a list of posts with flickr.com URLs in them.
+    """
     arg_dict = vars(args)
     wp = get_wp()
     count = 0
@@ -72,22 +78,35 @@ def catalog_posts(args):
         content =  post['content']['rendered']
         if "flickr.com" in content:
             print(post['id'], post['title']['rendered'], post['link'])
-            flickr_images = []
-            for match in flickr_photo_re.finditer(content):
-                # Let's store the key info in the posts catalog:
-                img_info = {
-                    "flickr_id": match.group(2),
-                    "url": match.group(1),
-                    "url_start": match.start(1),
-                    "url_end": match.end(1)
-                }
-                print(f"   {img_info['flickr_id']} at {img_info['url']}")
-                flickr_images.append(img_info)
-            post['flickr_images'] = flickr_images
             posts.append(post)
             count += 1
             if limit and count >= limit:
                 break
+    write_post_catalog(args.output, posts)
+
+def process_posts(args):
+    """
+    Build up information about URLs in post contents which match our regexes.
+    Augment the post catalog with this information.
+    """
+    posts = read_post_catalog(args.post_catalog)
+    print(len(posts), "posts to process")
+    for post in posts:
+        flickr_images = []
+        content =  post['content']['rendered']
+        for match in chain(
+            flickr_photo_re.finditer(content), 
+            flickr_farm_photo_re.finditer(content)
+        ):
+            img_info = {
+                "flickr_id": match.group(2),
+                "url": match.group(1),
+                "url_start": match.start(1),
+                "url_end": match.end(1)
+            }
+            print(f"   {img_info['flickr_id']} at {img_info['url']}")
+            flickr_images.append(img_info)
+        post['flickr_images'] = flickr_images
     write_post_catalog(args.output, posts)
 
 
@@ -113,13 +132,16 @@ def catalog_images(args):
         for image_info in post['flickr_images']:
             flickr_id = image_info['flickr_id']
             print("  ", flickr_id)
-            flickr_info = flickr.photos.getInfo(photo_id=flickr_id)            # print("  F:", flickr_info)
+            try:
+                flickr_info = flickr.photos.getInfo(photo_id=flickr_id)            # print("  F:", flickr_info)
 
-            size_info = flickr.photos.getSizes(photo_id=flickr_id)['sizes']['size']
-            sizes = { s['label']: s  for s in size_info}
-            flickr_info['sizes'] = sizes
-            photos.append(flickr_info)
-    
+                size_info = flickr.photos.getSizes(photo_id=flickr_id)['sizes']['size']
+                sizes = { s['label']: s  for s in size_info}
+                flickr_info['sizes'] = sizes
+                photos.append(flickr_info)
+            except flickrapi.exceptions.FlickrError as e:
+                print("  Error trying to get info from Flickr:", e)
+
     write_image_catalog(args.output, photos)
 
 
@@ -152,10 +174,14 @@ def download_images(args):
         elif 'Medium 640' in sizes:
             smaller_file = f"{flickr_id}_640.jpg"
             download_size(sizes['Medium 640']['source'], smaller_file)
+        elif 'Medium' in sizes:
+            smaller_file = f"{flickr_id}_medium.jpg"
+            download_size(sizes['Medium']['source'], smaller_file)
         else:
             print("    No Medium 800 - options:", sizes)
         original_file = f"{flickr_id}.jpg"
-        download_size(sizes['Original']['source'], original_file)
+        if 'Original' in sizes:
+            download_size(sizes['Original']['source'], original_file)
         return (original_file, smaller_file)
 
     for photo in photos:
@@ -163,7 +189,6 @@ def download_images(args):
         sizes = photo['sizes']
         (original_file, smaller_file) = download_photo(flickr_id, sizes)
 
-    
 
 def upload_to_wp(args):
     """
@@ -173,12 +198,25 @@ def upload_to_wp(args):
     """
     posts = read_post_catalog(args.post_catalog)
     print(len(posts), "posts in catalog")
-    if hasattr(args, 'limit'):
+    if args.limit:
         print(f"Limiting action to {args.limit} posts")
         posts = posts[:args.limit]
 
-    # images = read_image_catalog(args.image_catalog)
-    # image_map = {p['photo']['id']: p for p in images}
+    ignore_posts = {}
+    if args.excludes:
+        print(f"Ignoring posts listed in the first column of {args.excludes}")
+        with open(args.excludes, "r") as f:
+            rdr = csv.reader(f)
+            ignore_posts = {int(row[0]) for row in rdr}
+        print(f"{len(ignore_posts)} posts ignored")
+
+    already_uploaded = {}
+    if args.already_uploaded:
+        print(f"Getting existing mappings from local file to remote URL from {args.already_uploaded}")
+        with open(args.already_uploaded, "r") as f:
+            rdr = csv.reader(f)
+            already_uploaded = {row[0]:row[1] for row in rdr}
+        print(f"{len(already_uploaded)} images already uploaded")
 
     wp = get_wp()
 
@@ -198,24 +236,97 @@ def upload_to_wp(args):
         return attachment_url
 
     for post in posts:
-        post['upload_info'] = {}
+        if 'upload_info' not in post:
+            post['upload_info'] = {}
         print(f"Post {post['id']} at {post['link']} has these flickr ids:")
         for img_info in post['flickr_images']:
             flickr_id = img_info['flickr_id']
             print("  ", flickr_id)
+            if flickr_id in post['upload_info']:
+                print("    Already uploaded")
+                continue
             photo_data = {
                 "post": post['id'],
                 "date": post['date'],
                 "date_gmt": post['date_gmt'],
                 "description": f"Flickr item {flickr_id}."
             }
-            original_url = upload_media(f"{flickr_id}.jpg", f"{flickr_id}.jpg", photo_data)
-            medium_url = upload_media(f"{flickr_id}_800.jpg", f"{flickr_id}_800.jpg", photo_data)
+            original_file = f"{flickr_id}.jpg"
+            medium_file = f"{flickr_id}_800.jpg"
+            if original_file in already_uploaded:
+                original_url = already_uploaded[original_file]
+                print(f"    Already uploaded at {original_url}")
+            else:
+                original_url = upload_media(original_file, original_file, photo_data)
+            if medium_file in already_uploaded:
+                medium_url = already_uploaded[medium_file]
+                print(f"    Already uploaded at {medium_url}")
+            else:
+                medium_url = upload_media(medium_file, medium_file, photo_data)
             post['upload_info'][flickr_id] = {
                 "original_url": original_url,
                 "medium_url": medium_url
             }
     write_post_catalog(args.new_post_catalog, posts)
+
+
+def update_posts(args):
+    posts = read_post_catalog(args.post_catalog)
+    print(len(posts), "posts in catalog")
+
+    if args.limit:
+        print(f"Limiting action to {args.limit} posts")
+        posts = posts[:args.limit]
+
+    confirmation = input("""
+        This will replace the text of posts on your site!
+        
+        Please type YES to confirm you have checked your backups
+        and are happy to proceed: """)
+    if confirmation != "YES":
+        print("Aborting")
+        return
+    
+    wp = get_wp()
+
+    for post in posts:
+        print(f"\nPost {post['id']}: {post['title']['rendered']} at {post['link']}")
+        content = post['content']['rendered']
+        # print("Currently:")
+        # print(content)
+        new_content = content
+        # We want to do the last URL first, so we don't mess up the positions of the others.
+        flickr_images = sorted(post['flickr_images'], key=lambda x: x['url_start'], reverse=True)
+        for img in flickr_images:
+            fid = img["flickr_id"]
+            url = img["url"]
+            url_start = img["url_start"]
+            url_end = img["url_end"]
+            print(f"  {fid} at {url}")
+            try:
+                if content[url_start-6:url_start] == 'href="':
+                    print("    Looks like a link - using full-size image URL")
+                    new_url = post['upload_info'][fid]['original_url']
+                elif content[url_start-5:url_start] == 'src="':
+                    print("    Looks like an image - using medium image URL")
+                    new_url = post['upload_info'][fid]['medium_url']
+                else:
+                    print("    Not sure what this is - using medium image URL")
+                    new_url = post['upload_info'][fid]['medium_url']
+                new_content = new_content[:url_start] + new_url + new_content[url_end:]
+            except KeyError:
+                print(f"    No upload info for {fid}")
+
+        # print("Updated:")
+        # print(new_content)
+        if new_content != content:
+            print("  Updating post")
+            post['content']['rendered'] = new_content
+            wp.post(wp_rest_url(f"posts/{post['id']}"), data = {
+                'content': new_content
+            })
+
+
 
 
 def main():
@@ -227,6 +338,12 @@ def main():
     parser_catalog_posts.add_argument('--limit', type=int)
     parser_catalog_posts.add_argument('--output', type=str, default="posts.json", help="Output catalog file, default '%(default)s'")
     parser_catalog_posts.set_defaults(func=catalog_posts)
+
+    parser_process_posts = subparsers.add_parser('process_posts', help="Process posts to find URLs")
+    # add arguments for post_catalog, output
+    parser_process_posts.add_argument('--post_catalog', type=str, default="posts.json", help="Post catalog file to read, default '%(default)s'")
+    parser_process_posts.add_argument('--output', type=str, default="posts.json", help="Output post catalog file, default '%(default)s'")   
+    parser_process_posts.set_defaults(func=process_posts)
 
     parser_catalog_images = subparsers.add_parser('catalog_images', help="Get the details of images to be downloaded for the posts")
     parser_catalog_images.add_argument('--post_catalog', type=str, default="posts.json", help="Post catalog file to read, default '%(default)s'")
@@ -242,7 +359,14 @@ def main():
     parser_upload_to_wp.add_argument('--new_post_catalog', type=str, default="posts.json", help="Post catalog file to overwrite, default also '%(default)s'")
     parser_upload_to_wp.add_argument('--image_catalog', type=str, default="images.json", help="Image catalog file to read, default '%(default)s'")
     parser_upload_to_wp.add_argument('--limit', type=int, help="Stop after this many posts. You may also want to set new_post_catalog.")
+    parser_upload_to_wp.add_argument('--excludes', type=str, help="A CSV file containing post IDs to ignore in the first field.")
+    parser_upload_to_wp.add_argument('--already_uploaded', type=str, default="already_uploaded.csv", help="A CSV file containing filenames and URLs on WP.")
     parser_upload_to_wp.set_defaults(func=upload_to_wp)
+
+    parser_update_posts = subparsers.add_parser('update_posts', help="Update posts to use non-Flickr URLs. CHECK YOUR BACKUPS FIRST!")
+    parser_update_posts.add_argument('--post_catalog', type=str, default="posts.json", help="Post catalog file to read, default '%(default)s'")
+    parser_update_posts.add_argument('--limit', type=int, help="Stop after this many posts.")
+    parser_update_posts.set_defaults(func=update_posts)
 
     args = parser.parse_args()
     args.func(args)

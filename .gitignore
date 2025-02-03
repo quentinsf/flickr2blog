@@ -11,3 +11,5 @@ wheels/
 
 # Dynaconf secrets
 .secrets.toml
+
+downloads/

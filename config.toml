@@ -7,8 +7,9 @@
 download_dir = "./downloads"
 
 # WordPress credentials
-wordpress_url = 'https://statusq.org/xmlrpc.php'
+wordpress_url = 'https://statusq.org'
 wordpress_username = 'qsf'
+# You probably want to generate an application password to use here:
 # wordpress_password = 'in_secrets'
 
 # Flickr API credentials
